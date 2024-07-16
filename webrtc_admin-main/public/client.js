@@ -6,14 +6,35 @@ const startCallBtn = document.getElementById('startCall');
 const endCallBtn = document.getElementById('endCall');
 const localAudio = document.getElementById('localAudio');
 const remoteAudio = document.getElementById('remoteAudio');
+const callTimer = document.getElementById('callTimer');
 
 let localStream;
 let peerConnection;
 let isAdmin = false;
+let callStartTime;
+let callInterval;
+let recognition;
 
 const configuration = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
+
+function startTimer() {
+    callStartTime = Date.now();
+    callTimer.style.display = 'block';
+    callInterval = setInterval(() => {
+        const elapsedTime = Date.now() - callStartTime;
+        const minutes = Math.floor(elapsedTime / 60000);
+        const seconds = Math.floor((elapsedTime % 60000) / 1000);
+        callTimer.textContent = `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+    }, 1000);
+}
+
+function stopTimer() {
+    clearInterval(callInterval);
+    callTimer.textContent = '00:00';
+    callTimer.style.display = 'none';
+}
 
 adminLoginBtn.addEventListener('click', async () => {
     const adminId = prompt('Enter admin ID:');
@@ -24,6 +45,7 @@ adminLoginBtn.addEventListener('click', async () => {
             localAudio.muted = true;
             socket.emit('adminLogin', adminId);
             isAdmin = true;
+            endCallBtn.style.display = 'none'; // Hide end call button for admin
         } catch (error) {
             console.error('Error accessing media devices.', error);
         }
@@ -56,6 +78,9 @@ startCallBtn.addEventListener('click', async () => {
 
     peerConnection.ontrack = event => {
         remoteAudio.srcObject = event.streams[0];
+        if (isAdmin) {
+            startTranscription(event.streams[0]);
+        }
     };
 
     localStream.getTracks().forEach(track => {
@@ -74,6 +99,11 @@ endCallBtn.addEventListener('click', () => {
         localAudio.srcObject = null;
         remoteAudio.srcObject = null;
         socket.emit('endCall');
+        console.log('User ended the call');
+    }
+    stopTimer();
+    if (recognition) {
+        recognition.stop();
     }
 });
 
@@ -93,22 +123,24 @@ socket.on('offer', async (offer) => {
 
         peerConnection.ontrack = event => {
             remoteAudio.srcObject = event.streams[0];
+            startTranscription(event.streams[0]);
         };
 
         localStream.getTracks().forEach(track => {
             peerConnection.addTrack(track, localStream);
         });
-
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        socket.emit('answer', answer);
     }
+
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    socket.emit('answer', answer);
 });
 
 socket.on('answer', async (answer) => {
     if (peerConnection) {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        socket.emit('callStarted');
     }
 });
 
@@ -129,11 +161,15 @@ socket.on('endCall', () => {
         localAudio.srcObject = null;
         remoteAudio.srcObject = null;
     }
+    stopTimer();
+    if (recognition) {
+        recognition.stop();
+    }
 });
 
 socket.on('adminLoginSuccess', () => {
     alert('Admin logged in successfully');
-    endCallBtn.disabled = false; // Enables End Call button for the admin
+    endCallBtn.disabled = false;
 });
 
 socket.on('adminLoginFailure', (errorMessage) => {
@@ -141,13 +177,54 @@ socket.on('adminLoginFailure', (errorMessage) => {
 });
 
 socket.on('adminNotAvailable', () => {
-    alert('Admin is not available at the moment');
+    alert('No available admin at the moment');
 });
 
 socket.on('loginSuccess', () => {
     alert('User logged in successfully');
-    startCallBtn.disabled = false; // Enables Start Call button for the user
-    endCallBtn.disabled = false;   // Enables End Call button for the user
+    startCallBtn.disabled = false;
+    endCallBtn.disabled = false;
 });
 
+socket.on('callStarted', () => {
+    startTimer();
+});
 
+function startTranscription(stream) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        console.error('SpeechRecognition is not supported in this browser.');
+        return;
+    }
+
+    recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = event => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+            transcript += event.results[i][0].transcript;
+        }
+        console.log('Transcript:', transcript);
+        // Send the transcript to the admin's console
+        socket.emit('transcript', transcript);
+    };
+
+    recognition.onerror = event => {
+        console.error('SpeechRecognition error:', event.error);
+        if (event.error === 'network') {
+            // Handle network errors separately if needed
+        }
+    };
+
+    recognition.onend = () => {
+        console.log('SpeechRecognition service disconnected, restarting...');
+        if (peerConnection) { // Only restart if the call is still active
+            recognition.start();
+        }
+    };
+
+    recognition.start();
+}
