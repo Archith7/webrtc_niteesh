@@ -26,6 +26,7 @@ function startTimer() {
         const elapsedTime = Date.now() - callStartTime;
         const minutes = Math.floor(elapsedTime / 60000);
         const seconds = Math.floor((elapsedTime % 60000) / 1000);
+        // callTimer.textContent = `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
         callTimer.textContent = `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
     }, 1000);
 }
@@ -39,16 +40,9 @@ function stopTimer() {
 adminLoginBtn.addEventListener('click', async () => {
     const adminId = prompt('Enter admin ID:');
     if (adminId) {
-        try {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            localAudio.srcObject = localStream;
-            localAudio.muted = true;
-            socket.emit('adminLogin', adminId);
-            isAdmin = true;
-            endCallBtn.style.display = 'none'; // Hide end call button for admin
-        } catch (error) {
-            console.error('Error accessing media devices.', error);
-        }
+        socket.emit('adminLogin', adminId);
+        isAdmin = true;
+        endCallBtn.style.display = 'none'; // Hide end call button for admin
     }
 });
 
@@ -57,39 +51,35 @@ userLoginBtn.addEventListener('click', () => {
 });
 
 startCallBtn.addEventListener('click', async () => {
-    if (!localStream) {
+    if (!isAdmin) {
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
             localAudio.srcObject = localStream;
             localAudio.muted = true;
+
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit('candidate', event.candidate);
+                }
+            };
+
+            peerConnection.ontrack = event => {
+                remoteAudio.srcObject = event.streams[0];
+            };
+
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit('offer', offer);
         } catch (error) {
             console.error('Error accessing media devices.', error);
-            return;
         }
     }
-
-    peerConnection = new RTCPeerConnection(configuration);
-
-    peerConnection.onicecandidate = event => {
-        if (event.candidate) {
-            socket.emit('candidate', event.candidate);
-        }
-    };
-
-    peerConnection.ontrack = event => {
-        remoteAudio.srcObject = event.streams[0];
-        if (isAdmin) {
-            startTranscription(event.streams[0]);
-        }
-    };
-
-    localStream.getTracks().forEach(track => {
-        peerConnection.addTrack(track, localStream);
-    });
-
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    socket.emit('offer', offer);
 });
 
 endCallBtn.addEventListener('click', () => {
@@ -108,11 +98,7 @@ endCallBtn.addEventListener('click', () => {
 });
 
 socket.on('offer', async (offer) => {
-    if (!isAdmin) {
-        return;
-    }
-
-    if (!peerConnection) {
+    if (isAdmin) {
         peerConnection = new RTCPeerConnection(configuration);
 
         peerConnection.onicecandidate = event => {
@@ -126,15 +112,11 @@ socket.on('offer', async (offer) => {
             startTranscription(event.streams[0]);
         };
 
-        localStream.getTracks().forEach(track => {
-            peerConnection.addTrack(track, localStream);
-        });
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        socket.emit('answer', answer);
     }
-
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
-    socket.emit('answer', answer);
 });
 
 socket.on('answer', async (answer) => {
